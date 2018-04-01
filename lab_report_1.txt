@@ -1,0 +1,243 @@
+追踪Linux内核的启动过程
+PB16110428 王浩宇
+一、实验思路
+    系统内核的启动总是在应用程序的启动之前，因此，通过常规的方法调试内核是行不通的。于是，想到可以在虚拟机中启动一个操作系统，在虚拟机外部利用调试工具加以调试，达到类似于调试应用程序的效果。
+二、实验环境
+1、操作系统环境：Ubuntu 16.04
+2、内核版本：Linux 4.15.14
+3、虚拟机（qemu）版本：QEMU emulator version 2.5.0 
+4、调试工具（gdb)版本：gdb 8.1
+三、实验环境搭建
+1、下载qemu：
+输入指令 sudo apt-get install qemu
+2、下载内核：
+从网站www.kernel.org下载内核源码
+在源码的目录下解压：
+输入指令 tar -xzvf linux.4.15.14.tar.gz 
+3、编译内核：
+进入解压后的文件夹，配置内核并编译：
+输入指令 sudo make menuconfig
+过程中因为依赖包不足的原因失败，于是下载依赖包（可以参看提示）
+在配置过程中，需要设置下列选项：
+(1)取消Processor type and features->Build a relocatable kernel的子项Randomize the address of the kernel image(KASLR)
+(2)打开Kernel hacking->Compile-time checks and compiler options下的选项：
+Compile the kernel with debug info 
+Compile the kernel with the frame pointers
+另外，一些不需要的功能可以不编译，以节约编译时间，如网络功能等
+配置完成并保存后，开始编译
+输入指令（需要等待很长时间） sudo make 
+输入指令 sudo make install
+需要的是当前目录下的arch/x86/boot/bzImage和主目录下的boot/initrd.img-4.15.14
+把initrd.img-4.15.14移动到当前目录下
+4、下载gdb：
+从网站http://www.gnu.org/software/gdb/download/下载gdb源码
+在源码目录下解压：
+输入指令 tar -xzvf gdb-8.1.tar.gz 
+修改源代码（否则之后调试时会有错误）：
+修改gdb/remote.c文件中的static void process_g_packet (struct regcache *regcache)函数：
+由：
+if (buf_len > 2 * rsa->sizeof_g_packet)
+error (_("Remote 'g' packet reply is too long: %s"), rs->buf);
+改为：
+if (buf_len > 2 * rsa->sizeof_g_packet) {
+    rsa->sizeof_g_packet = buf_len;
+    for (i = 0; i < gdbarch_num_regs (gdbarch); i++)
+    {
+        if (rsa->regs[i].pnum == -1)
+            continue;
+        if (rsa->regs[i].offset >= rsa->sizeof_g_packet)
+            rsa->regs[i].in_g_packet = 0;
+        else
+            rsa->regs[i].in_g_packet = 1;
+    }
+}
+开始编译并安装：
+输入指令 sudo ./configure
+输入指令（需要等待一段时间） sudo make
+输入指令 sudo make install
+检验是否安装成功
+输入指令 gdb -v
+四、连接gdb和qemu
+1、连接方法：
+在usr/src/linux.4.15.14文件夹中
+输入指令 qemu-system-x86_64 -kernel arch/x86/boot/bzImage -initrd ./initrd.img-4.15.14 -smp 2 -S
+之后进入qemu，按ctrl+alt+2进入控制台
+输入 gdbserver tcp::1234
+在usr/src/linux.4.15.14目录再开启一个终端
+输入指令 gdb vmlinux
+输入指令 target remote localhost:1234
+输入指令 b start_kernel
+输入指令 c
+下面就是一般的gdb的用法了
+2、遇到问题：
+    在输入上述指令之后，gdb返回了Remote ‘g’ packet reply is too long。之后，不论什么样的指令都不被执行了，gdb无法继续调试。上网查询之后，找到了如上修改源码的解决办法。
+五、gdb调试与追踪：
+1、start_kernel
+    在init/main.c文件中的start_kernel函数处设置断点（这是第一个与体系结构无关的通用函数），可以看到寄存器状态如下：
+rax            0x0	0
+rbx            0x0	0
+rcx            0x0	0
+rdx            0x0	0
+rsi            0x2828350d	673723661
+rdi            0x14650	83536
+rbp            0x0	0x0 <irq_stack_union>
+rsp            0xffffffff82003f50	0xffffffff82003f50 <init_thread_union+16208>
+r8             0xffffffff825a4000	-2108014592
+r9             0x8	8
+r10            0x14	20
+r11            0x10000e3	16777443
+r12            0x0	0
+r13            0x0	0
+r14            0x0	0
+r15            0x0	0
+rip            0xffffffff82538aee	0xffffffff82538aee <start_kernel>
+eflags         0x46	[ PF ZF ]
+cs             0x10	16
+ss             0x0	0
+ds             0x0	0
+es             0x0	0
+    对照着源代码，可以看到start_kernel()函数调用了许多的初始化函数。事实上，start_kernel()函数的目的就是完成内核初始化并启动祖先进程(1号进程)。其中有几个重要的初始化函数，比如boot_cpu_init()函数，这是一个初始化CPU的函数;而rest_init()函数则是最后一个执行的函数，它不会返回。
+asmlinkage __visible void __init start_kernel(void)
+{
+	char *command_line;
+	char *after_dashes;
+
+	set_task_stack_end_magic(&init_task);
+	……
+	boot_cpu_init();
+	……
+	rest_init();
+}
+2、boot_cpu_init
+    在kernel/cpu.c文件中的boot_cpu_init()函数处设置断点，可以看到寄存器的状态如下：
+rax            0x0	0
+rbx            0xffffffffffffffff	-1
+rcx            0xfffffffffffffffa	-6
+rdx            0xffffffff82012480	-2113854336
+rsi            0xffffffff8205f3c0	-2113539136
+rdi            0xffffffff81e5d45e	-2115644322
+rbp            0x0	0x0 <irq_stack_union>
+rsp            0xffffffff82003f10	0xffffffff82003f10 <init_thread_union+16144>
+r8             0xffffffff825a4000	-2108014592
+r9             0x8	8
+r10            0x14	20
+r11            0x10000e3	16777443
+r12            0x0	0
+r13            0x0	0
+r14            0x0	0
+r15            0x0	0
+rip            0xffffffff8255b395	0xffffffff8255b395 <boot_cpu_init>
+eflags         0x46	[ PF ZF ]
+cs             0x10	16
+ss             0x0	0
+ds             0x0	0
+es             0x0	0
+    这是一个很短小的函数，源代码如下：
+void __init boot_cpu_init(void)
+{
+	int cpu = smp_processor_id();
+
+	/* Mark the boot cpu "present", "online" etc for SMP and UP case */
+	set_cpu_online(cpu, true);
+	set_cpu_active(cpu, true);
+	set_cpu_present(cpu, true);
+	set_cpu_possible(cpu, true);
+
+#ifdef CONFIG_SMP
+	__boot_cpu_id = cpu;
+#endif
+}
+    通过n命令将位置调到set_cpu_online(cpu,true)处，此时，可以看到，cpu已经被赋予了smp_processor_id()的返回值，通过下述指令查看cpu的值。
+(gdb) p cpu
+$1 = <optimized out>
+    无法查看cpu的值，只能查看寄存器。一般返回值保存在rax寄存器中，使用info registers命令查看，发现rax为0,因此cpu的值为0。
+    接着就是cpu的配置。boot_cpu_init（）函数设置了CPU的在线,激活,当前和热插拔的属性。
+3、rest_init
+    这个函数是start_kernel函数之后的第一个函数，同样位于init/main.c文件中。设置断点，寄存器状态如下：
+rax            0x0	0
+rbx            0xffffffffffffffff	-1
+rcx            0x0	0
+rdx            0x1	1
+rsi            0xffffffff82003df4	-2113913356
+rdi            0x604	1540
+rbp            0xffff8800076ca900	0xffff8800076ca900
+rsp            0xffffffff82003f10	0xffffffff82003f10 <init_thread_union+16144>
+r8             0x0	0
+r9             0x2	2
+r10            0x3ffffffff000	70368744173568
+r11            0x0	0
+r12            0xffffffff825e6920	-2107741920
+r13            0xffffffff826012e0	-2107632928
+r14            0x0	0
+r15            0x0	0
+rip            0xffffffff8171ac80	0xffffffff8171ac80 <rest_init>
+eflags         0x246	[ PF ZF IF ]
+cs             0x10	16
+ss             0x0	0
+ds             0x0	0
+es             0x0	0
+    它的源码如下：
+static noinline void __ref rest_init(void)
+{
+	struct task_struct *tsk;
+	int pid;
+
+	rcu_scheduler_starting();
+	/*
+	 * We need to spawn init first so that it obtains pid 1, however
+	 * the init task will end up wanting to create kthreads, which, if
+	 * we schedule it before we create kthreadd, will OOPS.
+	 */
+	pid = kernel_thread(kernel_init, NULL, CLONE_FS);
+	/*
+	 * Pin init on the boot CPU. Task migration is not properly working
+	 * until sched_init_smp() has been run. It will set the allowed
+	 * CPUs for init to the non isolated CPUs.
+	 */
+	rcu_read_lock();
+	tsk = find_task_by_pid_ns(pid, &init_pid_ns);
+	set_cpus_allowed_ptr(tsk, cpumask_of(smp_processor_id()));
+	rcu_read_unlock();
+
+	numa_default_policy();
+	pid = kernel_thread(kthreadd, NULL, CLONE_FS | CLONE_FILES);
+	rcu_read_lock();
+	kthreadd_task = find_task_by_pid_ns(pid, &init_pid_ns);
+	rcu_read_unlock();
+
+	/*
+	 * Enable might_sleep() and smp_processor_id() checks.
+	 * They cannot be enabled earlier because with CONFIG_PRREMPT=y
+	 * kernel_thread() would trigger might_sleep() splats. With
+	 * CONFIG_PREEMPT_VOLUNTARY=y the init task might have scheduled
+	 * already, but it's stuck on the kthreadd_done completion.
+	 */
+	system_state = SYSTEM_SCHEDULING;
+
+	complete(&kthreadd_done);
+
+	/*
+	 * The boot idle thread must execute schedule()
+	 * at least once to get things moving:
+	 */
+	schedule_preempt_disabled();
+	/* Call into cpu_idle with preempt disabled */
+	cpu_startup_entry(CPUHP_ONLINE);
+}
+    这个函数的主要功能是创建并启动内核线程init。同样的，我们可以查看pid的值，发现在第一个kernel_thread()函数返回时，pid=1。也就是说，init线程是内核的一号线程。之后，可以看到，在第二个kernel_thread()函数返回时，pid=2，kthreadd线程是内核的二号线程。
+六、感想与收获
+    通过这个实验，我对linux系统的启动过程有了更深的了解，同时对linux系统的操作也更加娴熟。
+    这个实验的难点其实在于前面的一系列工作，真正进行调试追踪其实并不难。实际上，我在前面的步骤上花费了超过10个小时，而最后一步只需要1个小时。从某种意义上说，实验的重点似乎没有明确。我觉得，如果下面几届继续做这个实验，可以提供更加详细的说明文档，以减轻学生的负担。
+
+
+
+
+
+
+
+
+
+
+
+
+
